@@ -1,70 +1,124 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
-#include <Arduino.h>
-#include <Adafruit_Sensor.h>
-#include <DHT.h>
-#include <DHT_U.h>
+#include <ThingSpeak.h>
+#include <HTTPClient.h>
 
-const int pinDanych = 13;
+#define ONE_WIRE_BUS 15
 
-#define DHT_PIN 13
-#define DHT_TYPE DHT11
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
-//Dane do sieci
-const char* ssid = "";
-const char* password = "";
-const char* udpAddress = "10.10.1.34";
-const int udpPort = 1234;
+// Dane sieciowe
+const char* ssid = "PH-WIFI";
+const char* haslo = "RETAILROBOTICS";
 
-WiFiUDP udp;
+// ThingSpeak
+unsigned long channelNumber = 3411103;
+const char *myWriteAPIKey = "0EL18I1OI2U27IW4";
 
-DHT dht(DHT_PIN, DHT_TYPE);
+// TalkBack
+unsigned long talkBackID = 57235;
+const char *talkBackAPIKey = "L5FO8NHB3A63LNJ3";
+
+unsigned long Delay = 15000;
+WiFiClient client;
 
 void setup() {
   Serial.begin(115200);
-  delay(2000); 
+  sensors.begin();
 
-  Serial.print("Łączenie z siecią.......");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, haslo);
+
+  Serial.print("Łączenie z siecią: ");
   Serial.println(ssid);
-  WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
-  Serial.println("");
-  Serial.println("Wi-Fi połączone!");
-  Serial.print("Adres Ip ESP32L ");
+  Serial.println("\nPołączono z Wi-Fi!");
+  Serial.print("Adres IP ESP32: ");
   Serial.println(WiFi.localIP());
-  dht.begin();
+
+  ThingSpeak.begin(client);
 }
 
 void loop() {
-  float wilgotnosc = dht.readHumidity();
-  float temperatura = dht.readTemperature();
 
-  if (!isnan(wilgotnosc) && !isnan(temperatura)) {
+  sensors.requestTemperatures();
+  float temperatura = sensors.getTempCByIndex(0); //1 CZUJNIK
+  float temperatura2 = sensors.getTempCByIndex(1); //2 CZUJNIK
+
+  if (isnan(temperatura)) {
+    Serial.println("Błąd odczytu temperatury!");
+    temperatura = 0;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.println("\n--- Wysyłanie danych do ThingSpeak ---");
     Serial.print("Temperatura: ");
-    Serial.print(temperatura);
-    Serial.print(" C | Wilgotnosc: ");
-    Serial.print(wilgotnosc);
-    Serial.println(" %");
+    Serial.println(temperatura);
+    Serial.println(temperatura2);
+    ThingSpeak.setField(1, temperatura);
+    ThingSpeak.setField(2, temperatura2);
+    int x = ThingSpeak.writeFields(channelNumber, myWriteAPIKey);
+
+    if (x == 200) {
+      Serial.println("Dane wysłane poprawnie!");
+    } else {
+      Serial.print("Błąd wysyłania. Kod HTTP: ");
+      Serial.println(x);
+    }
+
+    delay(500);
+
+    // Pobieranie komendy TalkBack
+    HTTPClient httpTalkBack;
+    String urlTalkBack = "http://api.thingspeak.com/talkbacks/" + String(talkBackID) +
+                         "/commands/execute.json?api_key=" + String(talkBackAPIKey);
+
+    httpTalkBack.begin(urlTalkBack);
+    int httpCode = httpTalkBack.GET();
+
+    if (httpCode == 200) {
+      String odpowiedz = httpTalkBack.getString();
+
+      int pos = odpowiedz.indexOf("\"command_string\":\"");
+      if (pos != -1) {
+        int start = pos + 18;
+        int end = odpowiedz.indexOf("\"", start);
+        String commandString = odpowiedz.substring(start, end);
+
+        Serial.print("Odebrano komendę: ");
+        Serial.println(commandString);
+
+        float sekundy = commandString.toFloat();
+        if (sekundy >= 15) {
+          Delay = sekundy * 1000;
+        } else {
+          Serial.println("Czas zbyt mały — ThingSpeak wymaga min. 15 sekund.");
+        }
+      } else {
+        Serial.println("Brak nowych komend TalkBack.");
+      }
+    } else {
+      Serial.print("Błąd pobierania TalkBack. Kod HTTP: ");
+      Serial.println(httpCode);
+    }
+
+    httpTalkBack.end();
+
   } else {
-    Serial.println("Blad odczytu z DHT11");
+    Serial.println("Brak połączenia z Wi-Fi!");
   }
 
-  delay(3000);
+  Serial.print("Oczekiwanie: ");
+  Serial.print(Delay / 1000);
+  Serial.println(" sekund...");
 
-  udp.beginPacket(udpAddress, udpPort);
-  udp.print(wilgotnosc);
-  udp.print(temperatura);
-
-  if (udp.endPacket()) {
-    Serial.println("Dane IPv4 wysłane pomyślnie");
-  } else {
-    Serial.println("Błąd wysyłania pakietu.");
-  }
-
-  delay(2000);
+  delay(Delay);
 }
